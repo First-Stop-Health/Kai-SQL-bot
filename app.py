@@ -102,7 +102,7 @@ def initialize_connection():
     cfg = st.secrets if "account_identifier" in st.secrets else os.environ
 
     url = _build_snowflake_url(cfg)
-    connect_args = _load_private_key_from_secrets(cfg)
+    connect_args = _build_snowflake_connect_args(cfg)
 
     engine = sqlalchemy.create_engine(url, connect_args=connect_args)
     db = SQLDatabase(engine=engine)
