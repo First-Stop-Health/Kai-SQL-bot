@@ -46,7 +46,7 @@ llm = ChatOpenAI(model=model_selection, temperature=0, streaming=True) if model_
 
 
 
-def _load_private_key_from_secrets(cfg) -> dict:
+def _build_snowflake_connect_args(cfg) -> dict:
     """
     Build Snowflake SQLAlchemy connect_args for key-pair (JWT) auth.
     Supports:
