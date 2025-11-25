@@ -168,20 +168,21 @@ with st.container():
     
         # function to extact the sql from the response and execute it   
         def execute_sql():
-    sql_matches = re.findall(r"```sql\n(.*?)\n```", last_output_message, re.DOTALL)
-    for sql in sql_matches:
-        try:
-            # Use the connection + text() pattern (SQLAlchemy 2.x)
-            engine = sqlalchemy.create_engine(conn_url, connect_args=conn_args)
-            with engine.connect() as conn:
-                result = conn.execute(text(sql))
-                df = pd.DataFrame(result.fetchall(), columns=result.keys())
+            sql_matches = re.findall(r"```sql\n(.*?)\n```", last_output_message, re.DOTALL)
+            for sql in sql_matches:
+                try:
+            # Use SQLAlchemy 2.x style connection
+                    engine = sqlalchemy.create_engine(conn_url, connect_args=conn_args)
+                    with engine.connect() as conn:
+                        result = conn.execute(text(sql))
+                        df = pd.DataFrame(result.fetchall(), columns=result.keys())
 
-            st.sidebar.write("Results")
-            st.sidebar.dataframe(df)
+                    st.sidebar.write("Results")
+                    st.sidebar.dataframe(df)
 
-        except Exception as e:
-            st.sidebar.warning(f"Invalid Query: {e}")
+                except Exception as e:
+                    st.sidebar.warning(f"Invalid Query: {e}")
+
 
         if re.findall(r"```sql\n(.*?)\n```", last_output_message, re.DOTALL):
             st.button("Execute SQL", on_click=execute_sql)     
