@@ -1,3 +1,4 @@
+import base64
 import openai
 import re
 import streamlit as st
@@ -7,6 +8,9 @@ import json
 import requests
 import pandas as pd
 
+from snowflake.sqlalchemy import URL
+from sqlalchemy import text
+from cryptography.hazmat.primitives import serialization
 from langchain.memory import StreamlitChatMessageHistory
 from langchain.memory import ConversationBufferMemory
 from langchain.memory.chat_message_histories import StreamlitChatMessageHistory
@@ -42,16 +46,70 @@ llm = ChatOpenAI(model=model_selection, temperature=0, streaming=True) if model_
 
 
 
+def _build_snowflake_connect_args(cfg) -> dict:
+    """
+    Build Snowflake SQLAlchemy connect_args for key-pair (JWT) auth.
+    Supports:
+      - Secret-only: private_key_pem or private_key_pem_b64 (no passphrase needed for unencrypted keys)
+      - File-based:  private_key_path (omit passphrase for unencrypted files)
+    """
+    connect_args = {"authenticator": "SNOWFLAKE_JWT"}
+
+    # File-based?
+    if "private_key_path" in cfg:
+        connect_args["private_key_file"] = cfg["private_key_path"]
+        # No private_key_file_pwd for unencrypted key
+        return connect_args
+
+    # Secret-only?
+    if "private_key_pem" in cfg or "private_key_pem_b64" in cfg:
+        if "private_key_pem" in cfg:
+            pem = cfg["private_key_pem"]
+        else:
+            pem = base64.b64decode(cfg["private_key_pem_b64"]).decode("utf-8")
+
+        # Unencrypted key => password=None
+        key_obj = serialization.load_pem_private_key(
+            data=pem.encode("utf-8"),
+            password=None,
+        )
+        # Export to PKCS#8 PEM for the connector
+        private_key_pem = key_obj.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode("utf-8")
+
+        connect_args["private_key"] = private_key_pem
+        return connect_args
+
+    raise RuntimeError("Missing key-pair secrets: provide private_key_pem (or private_key_pem_b64) or private_key_path.")
+
+
+def _build_snowflake_url(cfg) -> URL:
+    return URL(
+        account=cfg["account_identifier"],
+        user=cfg["user"],
+        database=cfg["database_name"],
+        schema=cfg["schema_name"],
+        warehouse=cfg.get("warehouse_name"),
+        role=cfg.get("role_name") or cfg.get("user"),
+    )
+
+
 def initialize_connection():
-    account_identifier = st.secrets["account_identifier"]
-    user = st.secrets["user"]
-    password = st.secrets["password"]
-    database_name = st.secrets["database_name"]
-    schema_name = st.secrets["schema_name"]
-    warehouse_name = st.secrets["warehouse_name"]
-    role_name = st.secrets["user"]
-    conn_string = f"snowflake://{user}:{password}@{account_identifier}/{database_name}/{schema_name}?warehouse={warehouse_name}&role={role_name}"
-    db = SQLDatabase.from_uri(conn_string)
+    # Prefer Keboola/Streamlit secrets; fallback to env for local dev
+    if hasattr(st, "secrets") and "account_identifier" in st.secrets:
+        cfg = st.secrets
+    else:
+        cfg = os.environ
+
+    url = _build_snowflake_url(cfg)
+    connect_args = _build_snowflake_connect_args(cfg)
+
+    engine = sqlalchemy.create_engine(url, connect_args=connect_args)
+    db = SQLDatabase(engine=engine)
+
     toolkit = SQLDatabaseToolkit(llm=llm, db=db)
     agent_executor = create_sql_agent(
         llm=llm,
@@ -64,11 +122,11 @@ def initialize_connection():
         memory=memory,
         return_intermediate_steps=True
     )
-    return agent_executor, conn_string
+    return agent_executor, url, connect_args
 
 
 
-agent_executor, conn_string = initialize_connection()   
+agent_executor, conn_url, conn_args = initialize_connection()  
 
 
 # Create a dictionary to store feedback counts
@@ -110,18 +168,21 @@ with st.container():
     
         # function to extact the sql from the response and execute it   
         def execute_sql():
-            sql_matches = re.findall(r"```sql\n(.*?)\n```", last_output_message, re.DOTALL)
-            for sql in sql_matches:
-                try:
-                    #connect to snowflake using sqlalchemy engine and execute the sql query
-                    engine = sqlalchemy.create_engine(conn_string)
-                    df = engine.execute(sql).fetchall()
-                    df = pd.DataFrame(df)
-                    st.sidebar.write("Results")
-                    st.sidebar.dataframe(df)
-                except Exception as e:
-                    #st.write(e) #in case you want to write the error
-                    st.sidebar.warning("Invalid Query")
+    sql_matches = re.findall(r"```sql\n(.*?)\n```", last_output_message, re.DOTALL)
+    for sql in sql_matches:
+        try:
+            # Use the connection + text() pattern (SQLAlchemy 2.x)
+            engine = sqlalchemy.create_engine(conn_url, connect_args=conn_args)
+            with engine.connect() as conn:
+                result = conn.execute(text(sql))
+                df = pd.DataFrame(result.fetchall(), columns=result.keys())
+
+            st.sidebar.write("Results")
+            st.sidebar.dataframe(df)
+
+        except Exception as e:
+            st.sidebar.warning(f"Invalid Query: {e}")
+
         if re.findall(r"```sql\n(.*?)\n```", last_output_message, re.DOTALL):
             st.button("Execute SQL", on_click=execute_sql)     
 
