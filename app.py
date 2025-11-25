@@ -99,7 +99,10 @@ def _build_snowflake_url(cfg) -> URL:
 
 def initialize_connection():
     # Prefer Keboola/Streamlit secrets; fallback to env for local dev
-    cfg = st.secrets if "account_identifier" in st.secrets else os.environ
+    if hasattr(st, "secrets") and "account_identifier" in st.secrets:
+        cfg = st.secrets
+    else:
+        cfg = os.environ
 
     url = _build_snowflake_url(cfg)
     connect_args = _build_snowflake_connect_args(cfg)
