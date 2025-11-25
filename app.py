@@ -93,7 +93,7 @@ def _build_snowflake_url(cfg) -> URL:
         database=cfg["database_name"],
         schema=cfg["schema_name"],
         warehouse=cfg.get("warehouse_name"),
-        role=cfg.get("role_name") if cfg.get("role_name") is not None else cfg.get("user"),
+        role=cfg.get("role_name") or cfg.get("user"),
     )
 
 
