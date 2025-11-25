@@ -11,7 +11,6 @@ import pandas as pd
 from snowflake.sqlalchemy import URL
 from sqlalchemy import text
 from cryptography.hazmat.primitives import serialization
-from langchain.memory import StreamlitChatMessageHistory
 from langchain.memory import ConversationBufferMemory
 from langchain.memory.chat_message_histories import StreamlitChatMessageHistory
 from langchain.agents import create_sql_agent
@@ -50,40 +49,50 @@ def _build_snowflake_connect_args(cfg) -> dict:
     """
     Build Snowflake SQLAlchemy connect_args for key-pair (JWT) auth.
     Supports:
-      - Secret-only: private_key_pem or private_key_pem_b64 (no passphrase needed for unencrypted keys)
-      - File-based:  private_key_path (omit passphrase for unencrypted files)
+      - private_key_path       (unencrypted PEM on disk)
+      - private_key_pem        (multiline PEM secret)
+      - private_key_pem_b64    (PEM encoded as base64)
+      - private_key_der_b64    (PKCS#8 DER encoded as base64)
     """
     connect_args = {"authenticator": "SNOWFLAKE_JWT"}
 
-    # File-based?
+    # A) File-based unencrypted key
     if "private_key_path" in cfg:
         connect_args["private_key_file"] = cfg["private_key_path"]
-        # No private_key_file_pwd for unencrypted key
         return connect_args
 
-    # Secret-only?
-    if "private_key_pem" in cfg or "private_key_pem_b64" in cfg:
-        if "private_key_pem" in cfg:
-            pem = cfg["private_key_pem"]
-        else:
-            pem = base64.b64decode(cfg["private_key_pem_b64"]).decode("utf-8")
+    # B) DER (PKCS#8) in base64 format (already the right thing)
+    if "private_key_der_b64" in cfg:
+        connect_args["private_key"] = base64.b64decode(cfg["private_key_der_b64"])
+        return connect_args
 
-        # Unencrypted key => password=None
+    # C) PEM stored as plaintext or base64
+    if "private_key_pem" in cfg or "private_key_pem_b64" in cfg:
+        if "private_key_pem_b64" in cfg:
+            pem = base64.b64decode(cfg["private_key_pem_b64"]).decode("utf-8")
+        else:
+            pem = cfg["private_key_pem"]
+
+        # Load unencrypted PEM
         key_obj = serialization.load_pem_private_key(
             data=pem.encode("utf-8"),
-            password=None,
+            password=None,  # unencrypted key
         )
-        # Export to PKCS#8 PEM for the connector
-        private_key_pem = key_obj.private_bytes(
-            encoding=serialization.Encoding.PEM,
+
+        # Export as DER bytes, which Snowflake expects for `private_key`
+        private_key_der = key_obj.private_bytes(
+            encoding=serialization.Encoding.DER,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
-        ).decode("utf-8")
+        )
 
-        connect_args["private_key"] = private_key_pem
+        connect_args["private_key"] = private_key_der
         return connect_args
 
-    raise RuntimeError("Missing key-pair secrets: provide private_key_pem (or private_key_pem_b64) or private_key_path.")
+    raise RuntimeError(
+        "Missing key-pair secrets: provide private_key_path OR private_key_pem(_b64) OR private_key_der_b64."
+    )
+
 
 
 def _build_snowflake_url(cfg) -> URL:
@@ -95,7 +104,7 @@ def _build_snowflake_url(cfg) -> URL:
         warehouse=cfg.get("warehouse_name"),
         role=cfg.get("role_name") or cfg.get("user"),
     )
-
+    
 
 def initialize_connection():
     # Prefer Keboola/Streamlit secrets; fallback to env for local dev
@@ -166,12 +175,13 @@ with st.container():
     if len(msgs.messages) > 1:
         last_output_message = msgs.messages[-1].content    
     
-        # function to extact the sql from the response and execute it   
+        # function to extact the sql from the response and execute it 
+        
         def execute_sql():
             sql_matches = re.findall(r"```sql\n(.*?)\n```", last_output_message, re.DOTALL)
             for sql in sql_matches:
                 try:
-            # Use SQLAlchemy 2.x style connection
+                    # Use SQLAlchemy 2.x style connection
                     engine = sqlalchemy.create_engine(conn_url, connect_args=conn_args)
                     with engine.connect() as conn:
                         result = conn.execute(text(sql))
@@ -182,6 +192,7 @@ with st.container():
 
                 except Exception as e:
                     st.sidebar.warning(f"Invalid Query: {e}")
+
 
 
         if re.findall(r"```sql\n(.*?)\n```", last_output_message, re.DOTALL):
